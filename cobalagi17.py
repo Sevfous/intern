@@ -34,44 +34,44 @@ MAX_ROWS_PER_PAGE = 5000     # Max rows per dataframe page
 MAX_PLOT_POINTS = 2000       # Max points for plotting
 
 # ------------------ DATABASE CONNECTION ------------------
+# def get_connection():
+#     """
+#     Connect to Supabase PostgreSQL database
+#     Credentials untuk project: db.jzrghramanqolxgzdpkf
+#     """
+#     try:
+#         connection = psycopg2.connect(
+#             host="db.jzrghramanqolxgzdpkf.supabase.co",
+#             port=6543,
+#             database="postgres",
+#             user="postgres",
+#             password="OAB6It7fUDIwYH2w",
+#             cursor_factory=RealDictCursor,
+#             sslmode='require'
+#         )
+#         connection.autocommit = False  # Manual commit
+#         return connection
+#     except Exception as e:
+#         st.error(f"❌ Koneksi database gagal: {e}")
+#         st.info("💡 Periksa credentials Supabase Anda")
+#         raise
+
+
 def get_connection():
     try:
-        connection = psycopg2.connect(
-            host=st.secrets["supabase"]["host"],
-            port=st.secrets["supabase"]["port"],
+        return psycopg2.connect(
+            host=st.secrets["supabase"]["host"],       
+            port=st.secrets["supabase"]["port"],       
             database=st.secrets["supabase"]["database"],
             user=st.secrets["supabase"]["user"],
             password=st.secrets["supabase"]["password"],
-            sslmode="require",          # ⬅️ INI WAJIB
-            cursor_factory=RealDictCursor
+            cursor_factory=RealDictCursor,
+            sslmode="require"
         )
-        connection.autocommit = False
-        return connection
     except Exception as e:
-        st.error("❌ Koneksi database gagal")
-        st.exception(e)
+        st.error(f"❌ Database connection failed: {e}")
         raise
 
-
-def get_connection_from_secrets():
-    """
-    Ambil koneksi dari Streamlit secrets (PALING AMAN)
-    """
-    try:
-        connection = psycopg2.connect(
-            host=st.secrets["supabase"]["host"],
-            port=st.secrets["supabase"]["port"],
-            database=st.secrets["supabase"]["database"],
-            user=st.secrets["supabase"]["user"],
-            password=st.secrets["supabase"]["password"],
-            cursor_factory=RealDictCursor
-        )
-        connection.autocommit = False
-        return connection
-    except Exception as e:
-        st.error(f"❌ Koneksi gagal: {e}")
-        st.info("💡 Pastikan secrets.toml sudah dikonfigurasi")
-        raise
 
 # ------------------ SESSION STATE INIT ------------------
 if 'logged_in' not in st.session_state:
@@ -124,7 +124,7 @@ def check_data_size_warning(df):
     return True
 
 def optimize_dataframe_memory(df):
-    """Optimize dataframe memory usage - FIXED to preserve datetime columns"""
+    """Optimize dataframe memory usage - FIXED to pmain(reserve datetime columns"""
     df_optimized = df.copy()
     
     # ✅ FIX: Identify datetime columns BEFORE optimization
@@ -3347,6 +3347,9 @@ def admin_management_page():
                         if delete_user_admin(user_id):
                             st.success(f"✅ User '{user_to_delete}' deleted!")
                             st.rerun()
+
+st.write("DB HOST =", st.secrets["supabase"]["host"])
+
 # ------------------ MAIN ------------------
 def main():
     """
