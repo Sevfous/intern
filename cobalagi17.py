@@ -7,7 +7,8 @@ import gc
 import warnings
 import matplotlib.pyplot as plt
 import hashlib
-import pymysql.cursors
+import psycopg2
+from psycopg2.extras import RealDictCursor
 import logging
 
 logging.basicConfig(
@@ -34,15 +35,46 @@ MAX_PLOT_POINTS = 2000       # Max points for plotting
 
 # ------------------ DATABASE CONNECTION ------------------
 def get_connection():
-    connection = pymysql.connect(
-        host='localhost',
-        user='root',
-        password='',
-        database='pt_xyz_test1',
-        cursorclass=pymysql.cursors.DictCursor,
-        autocommit=False
-    )
-    return connection
+    """
+    Connect to Supabase PostgreSQL database
+    Credentials untuk project: db.jzrghramanqolxgzdpkf
+    """
+    try:
+        connection = psycopg2.connect(
+            host="db.jzrghramanqolxgzdpkf.supabase.co",
+            port=5432,
+            database="postgres",
+            user="postgres",
+            password="OAB6It7fUDIwYH2w",
+            cursor_factory=RealDictCursor
+        )
+        connection.autocommit = False  # Manual commit
+        return connection
+    except Exception as e:
+        st.error(f"❌ Koneksi database gagal: {e}")
+        st.info("💡 Periksa credentials Supabase Anda")
+        raise
+
+
+def get_connection_from_secrets():
+    """
+    Ambil koneksi dari Streamlit secrets (PALING AMAN)
+    """
+    try:
+        connection = psycopg2.connect(
+            host=st.secrets["supabase"]["host"],
+            port=st.secrets["supabase"]["port"],
+            database=st.secrets["supabase"]["database"],
+            user=st.secrets["supabase"]["user"],
+            password=st.secrets["supabase"]["password"],
+            cursor_factory=RealDictCursor
+        )
+        connection.autocommit = False
+        return connection
+    except Exception as e:
+        st.error(f"❌ Koneksi gagal: {e}")
+        st.info("💡 Pastikan secrets.toml sudah dikonfigurasi")
+        raise
 
 # ------------------ SESSION STATE INIT ------------------
 if 'logged_in' not in st.session_state:
@@ -137,26 +169,51 @@ def optimize_dataframe_memory(df):
 
 # ------------------ DATABASE SCHEMA CHECKER ------------------
 def check_and_update_schema():
-    """Check and update database schema to include user_id columns"""
+    """
+    Check and update database schema untuk PostgreSQL
+    """
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
             # Check transactions table
-            cursor.execute("SHOW COLUMNS FROM transactions LIKE 'user_id'")
+            cursor.execute("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name = 'transactions' 
+                AND column_name = 'user_id'
+            """)
             if not cursor.fetchone():
-                cursor.execute("ALTER TABLE transactions ADD COLUMN user_id INT NOT NULL DEFAULT 0 AFTER id")
-                cursor.execute("ALTER TABLE transactions ADD INDEX idx_user_id (user_id)")
+                cursor.execute("""
+                    ALTER TABLE transactions 
+                    ADD COLUMN user_id INTEGER NOT NULL DEFAULT 0
+                """)
+                cursor.execute("""
+                    CREATE INDEX idx_transactions_user_id 
+                    ON transactions(user_id)
+                """)
                 st.info("✅ Added user_id column to transactions table")
             
             # Check forecasts table
-            cursor.execute("SHOW COLUMNS FROM forecasts LIKE 'user_id'")
+            cursor.execute("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name = 'forecasts' 
+                AND column_name = 'user_id'
+            """)
             if not cursor.fetchone():
-                cursor.execute("ALTER TABLE forecasts ADD COLUMN user_id INT NOT NULL DEFAULT 0 AFTER id")
-                cursor.execute("ALTER TABLE forecasts ADD INDEX idx_user_id (user_id)")
+                cursor.execute("""
+                    ALTER TABLE forecasts 
+                    ADD COLUMN user_id INTEGER NOT NULL DEFAULT 0
+                """)
+                cursor.execute("""
+                    CREATE INDEX idx_forecasts_user_id 
+                    ON forecasts(user_id)
+                """)
                 st.info("✅ Added user_id column to forecasts table")
             
         conn.commit()
     except Exception as e:
+        conn.rollback()
         st.warning(f"Schema check: {e}")
     finally:
         conn.close()
@@ -167,8 +224,7 @@ def hash_password(password: str) -> str:
 
 def save_transactions_to_db(df: pd.DataFrame, user_id: int, batch_size=1000):
     """
-    Save transactions to database with batch processing
-    Optimized for large datasets
+    Save transactions to PostgreSQL database with batch processing
     """
     if df is None or len(df) == 0:
         st.error("❌ Data kosong")
@@ -219,9 +275,9 @@ def save_transactions_to_db(df: pd.DataFrame, user_id: int, batch_size=1000):
     available_cols = [col for col in db_column_map.keys() if col in df.columns]
     db_cols = ['user_id'] + [db_column_map[col] for col in available_cols]
     
-    # Build SQL
+    # ✅ PostgreSQL uses %s placeholders (sama seperti MySQL)
     placeholders = ", ".join(["%s"] * len(db_cols))
-    cols_sql = ", ".join([f"`{c}`" for c in db_cols])
+    cols_sql = ", ".join([f'"{c}"' for c in db_cols])  # ✅ Use double quotes for PostgreSQL
     insert_sql = f"INSERT INTO transactions ({cols_sql}) VALUES ({placeholders})"
     
     conn = None
@@ -231,7 +287,6 @@ def save_transactions_to_db(df: pd.DataFrame, user_id: int, batch_size=1000):
     try:
         conn = get_connection()
         
-        # ✅ FIX: Validate batch_size is not None
         if batch_size is None or batch_size <= 0:
             batch_size = 1000
         
@@ -250,19 +305,17 @@ def save_transactions_to_db(df: pd.DataFrame, user_id: int, batch_size=1000):
             values = []
             
             for _, row in batch_df.iterrows():
-                row_vals = [int(user_id)]  # ✅ FIX: Ensure user_id is int
+                row_vals = [int(user_id)]
                 skip_row = False
                 
                 for col in available_cols:
                     v = row[col]
                     
-                    # Check required fields
                     if col in required_cols and pd.isna(v):
                         skipped += 1
                         skip_row = True
                         break
                     
-                    # Convert values
                     if pd.isna(v):
                         row_vals.append(None)
                     elif isinstance(v, (pd.Timestamp, datetime)):
@@ -277,9 +330,10 @@ def save_transactions_to_db(df: pd.DataFrame, user_id: int, batch_size=1000):
                 if not skip_row:
                     values.append(tuple(row_vals))
             
-            # Insert batch
+            # Insert batch using executemany
             if values:
                 with conn.cursor() as cur:
+                    # ✅ PostgreSQL executemany works the same way
                     cur.executemany(insert_sql, values)
                 conn.commit()
                 inserted += len(values)
@@ -293,16 +347,16 @@ def save_transactions_to_db(df: pd.DataFrame, user_id: int, batch_size=1000):
         status_text.empty()
         
         if skipped > 0:
-            st.warning(f"⚠️ {skipped:,} baris dilewati (order_date atau Final_Price kosong)")
+            st.warning(f"⚠️ {skipped:,} baris dilewati")
         
         st.success(f"✅ Berhasil menyimpan {inserted:,} transaksi ke database!")
         
         return inserted
         
-    except pymysql.err.IntegrityError as e:
+    except psycopg2.errors.UniqueViolation as e:  # ✅ PostgreSQL exception
         if conn:
             conn.rollback()
-        st.error(f"❌ Data duplikat atau constraint error: {e}")
+        st.error(f"❌ Data duplikat: {e}")
         return inserted
         
     except Exception as e:
@@ -321,40 +375,52 @@ def save_transactions_to_db(df: pd.DataFrame, user_id: int, batch_size=1000):
 
 def test_database_connection():
     """
-    Test database connection and show database info
+    Test koneksi ke Supabase PostgreSQL
     """
     conn = None
     try:
         conn = get_connection()
         
         with conn.cursor() as cursor:
-            # Test connection
+            # Test query
             cursor.execute("SELECT 1")
             
             # Get database info
-            cursor.execute("SELECT DATABASE()")
-            db_name = cursor.fetchone()
+            cursor.execute("SELECT current_database()")
+            db_name = cursor.fetchone()['current_database']
             
-            # Get table info
-            cursor.execute("SHOW TABLES")
+            # Get table list
+            cursor.execute("""
+                SELECT table_name 
+                FROM information_schema.tables 
+                WHERE table_schema = 'public'
+            """)
             tables = cursor.fetchall()
             
             # Get transactions table structure
-            cursor.execute("DESCRIBE transactions")
+            cursor.execute("""
+                SELECT column_name, data_type, character_maximum_length
+                FROM information_schema.columns
+                WHERE table_name = 'transactions'
+                ORDER BY ordinal_position
+            """)
             structure = cursor.fetchall()
         
-        st.success("✅ Database connection successful!")
+        st.success("✅ Koneksi Supabase berhasil!")
         st.info(f"📊 Database: {db_name}")
-        st.write("📋 Available tables:", [list(t.values())[0] for t in tables])
+        st.write("📋 Available tables:", [t['table_name'] for t in tables])
         
-        with st.expander("🔍 Transactions Table Structure"):
-            st.dataframe(pd.DataFrame(structure))
+        if structure:
+            with st.expander("🔍 Transactions Table Structure"):
+                st.dataframe(pd.DataFrame(structure))
+        else:
+            st.warning("⚠️ Table 'transactions' belum dibuat")
         
         return True
         
     except Exception as e:
-        st.error(f"❌ Database connection failed: {e}")
-        st.info("💡 Check: MySQL running, database created, credentials correct")
+        st.error(f"❌ Koneksi gagal: {e}")
+        st.info("💡 Periksa: Supabase running, database created, credentials benar")
         return False
         
     finally:
@@ -363,14 +429,7 @@ def test_database_connection():
 
 def load_transactions_from_db(user_id: int, limit=None, offset=0, date_from=None, date_to=None):
     """
-    Load ALL transactions from database (no limit by default)
-    
-    Args:
-        user_id: User ID to filter
-        limit: Maximum rows to load (None = unlimited)
-        offset: Starting position (for pagination)
-        date_from: Filter from date (optional)
-        date_to: Filter to date (optional)
+    Load transactions from PostgreSQL database
     """
     if user_id is None:
         st.error("❌ User ID tidak ditemukan. Silakan login ulang.")
@@ -380,7 +439,7 @@ def load_transactions_from_db(user_id: int, limit=None, offset=0, date_from=None
     try:
         conn = get_connection()
         
-        # Build query with optional date filters
+        # Build query
         base_query = """
             SELECT 
                 id,
@@ -391,14 +450,14 @@ def load_transactions_from_db(user_id: int, limit=None, offset=0, date_from=None
                 brand,
                 product_name,
                 sku,
-                Cat2,
+                "Cat2",
                 qty,
                 price,
                 bundle_price,
                 subtotal,
                 discount,
                 shipping_fee,
-                Final_Price,
+                "Final_Price",
                 bulan,
                 year,
                 month,
@@ -409,7 +468,6 @@ def load_transactions_from_db(user_id: int, limit=None, offset=0, date_from=None
         
         params = [user_id]
         
-        # Add date filters if provided
         if date_from:
             base_query += " AND order_date >= %s"
             params.append(date_from)
@@ -418,15 +476,13 @@ def load_transactions_from_db(user_id: int, limit=None, offset=0, date_from=None
             base_query += " AND order_date <= %s"
             params.append(date_to)
         
-        # Add ordering
         base_query += " ORDER BY order_date DESC"
         
-        # Only add LIMIT if specified
         if limit is not None:
             base_query += " LIMIT %s OFFSET %s"
             params.extend([limit, offset])
         
-        # Get total count for info
+        # Get total count
         count_query = "SELECT COUNT(*) as total FROM transactions WHERE user_id = %s"
         count_params = [user_id]
         
@@ -443,14 +499,14 @@ def load_transactions_from_db(user_id: int, limit=None, offset=0, date_from=None
             total_rows = cursor.fetchone()['total']
             
             if total_rows == 0:
-                st.warning(f"⚠️ Tidak ada data transaksi ditemukan untuk user_id: {user_id}")
+                st.warning(f"⚠️ Tidak ada data transaksi untuk user_id: {user_id}")
                 return None
             
             # Show loading progress for large datasets
             if total_rows > 50000:
                 progress_bar = st.progress(0)
                 status_text = st.empty()
-                status_text.text(f"📥 Loading {total_rows:,} rows from database...")
+                status_text.text(f"📥 Loading {total_rows:,} rows...")
             
             # Load data
             cursor.execute(base_query, params)
@@ -481,23 +537,17 @@ def load_transactions_from_db(user_id: int, limit=None, offset=0, date_from=None
             status_text.empty()
             progress_bar.empty()
         
-        # Show success message
         memory_mb = df.memory_usage(deep=True).sum() / 1024 / 1024
-        st.success(f"✅ Loaded ALL {len(df):,} rows from database ({memory_mb:.2f} MB)")
-        
-        if memory_mb > 200:
-            st.warning(f"⚠️ Large dataset: {memory_mb:.2f} MB in memory. Consider using date filters for better performance.")
+        st.success(f"✅ Loaded {len(df):,} rows ({memory_mb:.2f} MB)")
         
         return df
         
-    except pymysql.err.OperationalError as e:
+    except psycopg2.OperationalError as e:  # ✅ PostgreSQL exception
         st.error(f"❌ Database connection error: {e}")
-        st.info("💡 Pastikan MySQL server berjalan dan kredensial database benar")
         return None
         
-    except pymysql.err.ProgrammingError as e:
+    except psycopg2.ProgrammingError as e:  # ✅ PostgreSQL exception
         st.error(f"❌ SQL query error: {e}")
-        st.info("💡 Periksa struktur tabel 'transactions' di database")
         return None
         
     except Exception as e:
@@ -593,12 +643,18 @@ def load_transactions_by_date_range(user_id: int, start_date, end_date):
             conn.close()
 
 def save_forecasts_to_db(user_id: int, model: str, dates, values):
-    """Save forecasts to database with user_id"""
+    """
+    Save forecasts to PostgreSQL database
+    """
     if user_id is None:
-        st.error("User tidak ditemukan. Login terlebih dahulu untuk menyimpan forecast.")
+        st.error("User tidak ditemukan. Login terlebih dahulu.")
         return 0
     
-    insert_sql = "INSERT INTO forecasts (user_id, username, model_type, forecast_date, forecast_value) VALUES (%s, %s, %s, %s, %s)"
+    insert_sql = """
+        INSERT INTO forecasts 
+        (user_id, username, model_type, forecast_date, forecast_value) 
+        VALUES (%s, %s, %s, %s, %s)
+    """
     payload = []
     username = st.session_state.get('username', 'unknown')
     
@@ -617,7 +673,8 @@ def save_forecasts_to_db(user_id: int, model: str, dates, values):
         conn.commit()
         inserted = len(payload)
     except Exception as e:
-        st.error(f"Failed to save forecasts to DB: {e}")
+        conn.rollback()
+        st.error(f"Failed to save forecasts: {e}")
     finally:
         conn.close()
     return inserted
@@ -626,8 +683,7 @@ DEBUG_MODE = False  # ← Set ke True dulu untuk debugging
 
 def get_forecast_history(user_id: int, limit=20):
     """
-    Get forecast history grouped by session (created_at date)
-    Returns summary table with aggregated data
+    Get forecast history grouped by session - PostgreSQL version
     """
     if user_id is None:
         return None
@@ -637,22 +693,23 @@ def get_forecast_history(user_id: int, limit=20):
         conn = get_connection()
         
         query = """
-                    SELECT 
-                        model_type,
-                        DATE(created_at) AS session_date,
-                        MIN(forecast_date) AS start_date,
-                        MAX(forecast_date) AS end_date,
-                        COUNT(*) AS forecast_days,
-                        AVG(forecast_value) AS avg_forecast,
-                        MIN(forecast_value) AS min_forecast,
-                        MAX(forecast_value) AS max_forecast,
-                        SUM(forecast_value) AS total_forecast
-                    FROM forecasts
-                    WHERE user_id = %s
-                    GROUP BY model_type, created_at
-                    ORDER BY DATE(created_at) DESC 
-                    LIMIT %s
+            SELECT 
+                model_type,
+                DATE(created_at) AS session_date,
+                MIN(forecast_date) AS start_date,
+                MAX(forecast_date) AS end_date,
+                COUNT(*) AS forecast_days,
+                AVG(forecast_value) AS avg_forecast,
+                MIN(forecast_value) AS min_forecast,
+                MAX(forecast_value) AS max_forecast,
+                SUM(forecast_value) AS total_forecast
+            FROM forecasts
+            WHERE user_id = %s
+            GROUP BY model_type, DATE(created_at)
+            ORDER BY DATE(created_at) DESC 
+            LIMIT %s
         """
+        
         with conn.cursor() as cursor:
             cursor.execute(query, (user_id, limit))
             results = cursor.fetchall()
@@ -663,7 +720,7 @@ def get_forecast_history(user_id: int, limit=20):
         # Convert to DataFrame
         df = pd.DataFrame(results)
         
-        # Convert numeric columns properly
+        # Convert numeric columns
         df['forecast_days'] = pd.to_numeric(df['forecast_days'], errors='coerce').fillna(0).astype(int)
         df['avg_forecast'] = pd.to_numeric(df['avg_forecast'], errors='coerce').fillna(0.0)
         df['min_forecast'] = pd.to_numeric(df['min_forecast'], errors='coerce').fillna(0.0)
@@ -677,13 +734,13 @@ def get_forecast_history(user_id: int, limit=20):
                 df[col] = df[col].dt.strftime('%Y-%m-%d')
                 df[col] = df[col].fillna('N/A')
         
-        # Format numeric columns for display
+        # Format numeric columns
         df['avg_forecast'] = df['avg_forecast'].apply(lambda x: f"{x:,.2f}")
         df['min_forecast'] = df['min_forecast'].apply(lambda x: f"{x:,.2f}")
         df['max_forecast'] = df['max_forecast'].apply(lambda x: f"{x:,.2f}")
         df['total_forecast'] = df['total_forecast'].apply(lambda x: f"{x:,.2f}")
         
-        # Rename columns for display
+        # Rename columns
         df = df.rename(columns={
             'model_type': 'Model',
             'session_date': 'Session Date',
@@ -712,7 +769,7 @@ def get_forecast_history(user_id: int, limit=20):
 
 def get_forecast_details(user_id: int, session_date: str, model_type: str):
     """
-    Get detailed daily forecast values
+    Get detailed daily forecast values - PostgreSQL version
     """
     if user_id is None:
         return None
@@ -739,7 +796,6 @@ def get_forecast_details(user_id: int, session_date: str, model_type: str):
         if not results or len(results) == 0:
             return pd.DataFrame(columns=['Date', 'Forecast Value'])
         
-        # Convert to DataFrame
         df = pd.DataFrame(results)
         
         # Convert to proper types
@@ -774,7 +830,7 @@ def get_forecast_details(user_id: int, session_date: str, model_type: str):
 
 def get_latest_forecast_summary(user_id: int):
     """
-    Get summary of the most recent forecast session
+    Get summary of most recent forecast - PostgreSQL version
     """
     if user_id is None:
         return None
@@ -807,7 +863,7 @@ def get_latest_forecast_summary(user_id: int):
         if not result:
             return None
         
-        # Convert all values to proper types
+        # Convert values to proper types
         result['forecast_days'] = int(result['forecast_days']) if result['forecast_days'] else 0
         result['avg_value'] = float(result['avg_value']) if result['avg_value'] else 0.0
         result['total_value'] = float(result['total_value']) if result['total_value'] else 0.0
@@ -834,8 +890,7 @@ def get_latest_forecast_summary(user_id: int):
 
 def get_user_statistics(user_id: int):
     """
-    Get statistics for a specific user
-    Added timeout and error handling
+    Get statistics for a specific user - PostgreSQL version
     """
     if user_id is None:
         return {'total_transactions': 0, 'total_forecasts': 0, 'latest_upload': None}
@@ -844,46 +899,37 @@ def get_user_statistics(user_id: int):
     try:
         conn = get_connection()
         
-        # ✅ FIX: Set timeout untuk mencegah hang
         with conn.cursor() as cursor:
-            # Query 1: Total transactions (with timeout protection)
+            # Total transactions
             cursor.execute(
-                "SELECT COUNT(*) as count FROM transactions WHERE user_id = %s LIMIT 1", 
+                "SELECT COUNT(*) as count FROM transactions WHERE user_id = %s", 
                 (user_id,)
             )
             result = cursor.fetchone()
             total_transactions = result['count'] if result else 0
             
-            # Query 2: Total forecasts (count unique sessions)
+            # Total forecasts
             cursor.execute(
                 """
-                    SELECT COUNT(*) AS count
-                    FROM (
-                        SELECT 
-                            model_type,
-                            DATE(created_at) AS session_date,
-                            MIN(forecast_date) AS start_date,
-                            MAX(forecast_date) AS end_date,
-                            COUNT(*) AS forecast_days,
-                            AVG(forecast_value) AS avg_forecast,
-                            MIN(forecast_value) AS min_forecast,
-                            MAX(forecast_value) AS max_forecast,
-                            SUM(forecast_value) AS total_forecast
-                        FROM forecasts
-                        WHERE user_id = %s
-                        GROUP BY model_type, created_at
-                        ORDER BY DATE(created_at) DESC 
-                        LIMIT %s
-                    ) AS t;
+                SELECT COUNT(*) AS count
+                FROM (
+                    SELECT 
+                        model_type,
+                        DATE(created_at) AS session_date
+                    FROM forecasts
+                    WHERE user_id = %s
+                    GROUP BY model_type, DATE(created_at)
+                    LIMIT 999
+                ) AS t
                 """, 
-                (user_id, 999,)
+                (user_id,)
             )
             result = cursor.fetchone()
             total_forecasts = result['count'] if result else 0
             
-            # Query 3: Latest upload (with limit)
+            # Latest upload
             cursor.execute(
-                "SELECT MAX(created_at) as latest FROM transactions WHERE user_id = %s LIMIT 1", 
+                "SELECT MAX(created_at) as latest FROM transactions WHERE user_id = %s", 
                 (user_id,)
             )
             result = cursor.fetchone()
@@ -895,13 +941,11 @@ def get_user_statistics(user_id: int):
             'latest_upload': latest_upload
         }
         
-    except pymysql.err.OperationalError as e:
-        # Database connection error
+    except psycopg2.OperationalError as e:
         st.error(f"❌ Database connection error: {e}")
         return {'total_transactions': 0, 'total_forecasts': 0, 'latest_upload': None}
         
     except Exception as e:
-        # Other errors
         st.error(f"❌ Failed to get user statistics: {e}")
         return {'total_transactions': 0, 'total_forecasts': 0, 'latest_upload': None}
         
@@ -910,7 +954,7 @@ def get_user_statistics(user_id: int):
             conn.close()
 
 def is_admin_user(user_id):
-    """Check if user is admin"""
+    """Check if user is admin - PostgreSQL version"""
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
@@ -925,15 +969,14 @@ def is_admin_user(user_id):
 
 def get_all_users_admin():
     """
-    Get all users with their passwords (admin only)
-    Optimized query with timeout protection
+    Get all users with their statistics - PostgreSQL version
     """
     conn = None
     try:
         conn = get_connection()
         
         with conn.cursor() as cursor:
-            # ✅ FIX: Simplified query, remove complex subquery
+            # Simplified query
             query = """
                 SELECT 
                     u.id,
@@ -953,34 +996,25 @@ def get_all_users_admin():
             cursor.execute(query)
             results = cursor.fetchall()
             
-            # ✅ FIX: Fetch forecasts separately (faster)
             if results:
                 df = pd.DataFrame(results)
                 
-                # Get forecast counts for each user
+                # Get forecast counts separately
                 for idx, row in df.iterrows():
                     cursor.execute(
                         """
-                            SELECT COUNT(*) AS count
-                            FROM (
-                                SELECT 
-                                    model_type,
-                                    DATE(created_at) AS session_date,
-                                    MIN(forecast_date) AS start_date,
-                                    MAX(forecast_date) AS end_date,
-                                    COUNT(*) AS forecast_days,
-                                    AVG(forecast_value) AS avg_forecast,
-                                    MIN(forecast_value) AS min_forecast,
-                                    MAX(forecast_value) AS max_forecast,
-                                    SUM(forecast_value) AS total_forecast
-                                FROM forecasts
-                                WHERE user_id = %s
-                                GROUP BY model_type, created_at
-                                ORDER BY DATE(created_at) DESC 
-                                LIMIT %s
-                            ) AS t
+                        SELECT COUNT(*) AS count
+                        FROM (
+                            SELECT 
+                                model_type,
+                                DATE(created_at) AS session_date
+                            FROM forecasts
+                            WHERE user_id = %s
+                            GROUP BY model_type, DATE(created_at)
+                            LIMIT 999
+                        ) AS t
                         """,
-                        (row['id'], 999, )
+                        (row['id'],)
                     )
                     fc_result = cursor.fetchone()
                     df.at[idx, 'total_forecasts'] = fc_result['count'] if fc_result else 0
@@ -1070,14 +1104,14 @@ def debug_upload_history():
 
 def get_latest_uploads_admin():
     """
-    Get latest CSV uploads per user - FIXED with better debugging
+    Get latest CSV uploads per user - PostgreSQL version
     """
     conn = None
     try:
         conn = get_connection()
         
         with conn.cursor() as cursor:
-            # First, check total records
+            # Check total records
             cursor.execute("SELECT COUNT(*) as total FROM upload_history")
             total_result = cursor.fetchone()
             total_records = total_result['total'] if total_result else 0
@@ -1085,8 +1119,7 @@ def get_latest_uploads_admin():
             st.info(f"📊 Total records in upload_history: {total_records}")
             
             if total_records == 0:
-                st.warning("⚠️ No upload history records found in database!")
-                st.info("💡 Upload history will appear after users upload CSV files")
+                st.warning("⚠️ No upload history records found!")
                 return pd.DataFrame()
             
             # Main query
@@ -1114,10 +1147,7 @@ def get_latest_uploads_admin():
         
         if results and len(results) > 0:
             df = pd.DataFrame(results)
-            
-            # Handle missing usernames
             df['username'] = df['username'].fillna('Unknown User')
-            
             return df
         else:
             st.warning("⚠️ Query returned no results")
@@ -1162,86 +1192,61 @@ def get_user_latest_upload(user_id):
 
 def log_upload_history(user_id, username, filename, file_size_mb, total_rows, status='success', error_msg=None):
     """
-    Log CSV upload to history table - BULLETPROOF VERSION
-    
-    This version includes extensive validation and verification
+    Log CSV upload to history table - PostgreSQL version
+    ✅ MENGGUNAKAN RETURNING untuk mendapatkan ID yang baru diinsert
     """
     import traceback
     
     conn = None
     
     try:
-        # ========== VALIDATION ==========
         st.write("🔍 **Validating data...**")
         
-        # Validate user_id
         if user_id is None or user_id <= 0:
             st.error(f"❌ Invalid user_id: {user_id}")
             return False
         
-        # Validate required fields
         if not username or not filename:
-            st.error(f"❌ Missing required fields: username={username}, filename={filename}")
+            st.error(f"❌ Missing required fields")
             return False
         
         st.write(f"✓ user_id: {user_id}")
         st.write(f"✓ username: {username}")
         st.write(f"✓ filename: {filename}")
-        st.write(f"✓ size: {file_size_mb:.2f} MB")
-        st.write(f"✓ rows: {total_rows:,}")
-        st.write(f"✓ status: {status}")
         
-        st.markdown("---")
-        
-        # ========== DATABASE CONNECTION ==========
         st.write("🔌 **Connecting to database...**")
         conn = get_connection()
         st.write("✓ Connected")
         
-        # ========== TABLE VERIFICATION ==========
         st.write("🔍 **Verifying upload_history table...**")
         
         with conn.cursor() as cursor:
             # Check if table exists
-            cursor.execute("SHOW TABLES LIKE 'upload_history'")
+            cursor.execute("""
+                SELECT table_name 
+                FROM information_schema.tables 
+                WHERE table_schema = 'public' 
+                AND table_name = 'upload_history'
+            """)
             table_exists = cursor.fetchone()
             
             if not table_exists:
                 st.error("❌ Table 'upload_history' does not exist!")
-                st.info("💡 Create table using the SQL script provided earlier")
                 return False
             
             st.write("✓ Table exists")
-            
-            # Verify table structure
-            cursor.execute("DESCRIBE upload_history")
-            columns = cursor.fetchall()
-            column_names = [col['Field'] for col in columns]
-            
-            required_columns = ['id', 'user_id', 'username', 'filename', 'file_size_mb', 
-                              'total_rows', 'upload_date', 'status', 'error_message']
-            
-            missing_columns = [col for col in required_columns if col not in column_names]
-            
-            if missing_columns:
-                st.error(f"❌ Missing columns: {missing_columns}")
-                return False
-            
-            st.write(f"✓ All required columns present ({len(column_names)} columns)")
         
-        st.markdown("---")
-        
-        # ========== INSERT OPERATION ==========
         st.write("💾 **Inserting record...**")
         
         with conn.cursor() as cursor:
+            # ✅ PostgreSQL: Use RETURNING untuk get last insert ID
             insert_query = """
                 INSERT INTO upload_history 
                 (user_id, username, filename, file_size_mb, total_rows, status, error_message)
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
             """
             
-            # Prepare values with proper type casting
             values = (
                 int(user_id),
                 str(username),
@@ -1252,42 +1257,18 @@ def log_upload_history(user_id, username, filename, file_size_mb, total_rows, st
                 str(error_msg) if error_msg else None
             )
             
-            # Show what will be inserted
-            st.write("📝 **Values to insert:**")
-            st.json({
-                'user_id': int(user_id),
-                'username': str(username),
-                'filename': str(filename),
-                'file_size_mb': float(file_size_mb),
-                'total_rows': int(total_rows),
-                'status': str(status),
-                'error_message': str(error_msg) if error_msg else None
-            })
-            
-            # Execute insert
             cursor.execute(insert_query, values)
+            last_id = cursor.fetchone()['id']  # ✅ Get ID dari RETURNING
             
             st.write("✓ INSERT executed")
         
-        # ========== COMMIT ==========
         st.write("💾 **Committing transaction...**")
         conn.commit()
         st.write("✓ Committed")
         
-        st.markdown("---")
-        
-        # ========== VERIFICATION ==========
         st.write("🔍 **Verifying insert...**")
         
         with conn.cursor() as cursor:
-            # Get the last inserted ID
-            cursor.execute("SELECT LAST_INSERT_ID() as last_id")
-            result = cursor.fetchone()
-            last_id = result['last_id']
-            
-            st.write(f"✓ Last insert ID: **{last_id}**")
-            
-            # Query back the inserted record
             cursor.execute("""
                 SELECT * FROM upload_history 
                 WHERE id = %s
@@ -1297,49 +1278,31 @@ def log_upload_history(user_id, username, filename, file_size_mb, total_rows, st
             
             if saved_record:
                 st.success("✅ **Record verified in database!**")
-                
-                # Show the saved record
                 with st.expander("👁️ View Saved Record"):
                     st.json(saved_record)
-                
                 return True
             else:
                 st.error("❌ Record not found after insert!")
                 return False
         
-    except pymysql.err.IntegrityError as e:
+    except psycopg2.errors.UniqueViolation as e:  # ✅ PostgreSQL exception
         if conn:
             conn.rollback()
-        
-        st.error(f"❌ Database constraint error: {e}")
-        st.info("💡 This might be a duplicate key or foreign key violation")
-        
-        with st.expander("🔍 Error Details"):
-            st.code(traceback.format_exc())
-        
+        st.error(f"❌ Duplicate key error: {e}")
         return False
         
-    except pymysql.err.OperationalError as e:
+    except psycopg2.OperationalError as e:  # ✅ PostgreSQL exception
         if conn:
             conn.rollback()
-        
         st.error(f"❌ Database connection error: {e}")
-        st.info("💡 Check if MySQL server is running and credentials are correct")
-        
-        with st.expander("🔍 Error Details"):
-            st.code(traceback.format_exc())
-        
         return False
         
     except Exception as e:
         if conn:
             conn.rollback()
-        
         st.error(f"❌ Unexpected error: {e}")
-        
         with st.expander("🔍 Full Error Traceback"):
             st.code(traceback.format_exc())
-        
         return False
         
     finally:
@@ -1396,7 +1359,7 @@ def verify_upload_history_count():
 
 
 def reset_user_password_admin(user_id, new_password):
-    """Admin reset user password"""
+    """Admin reset user password - PostgreSQL version"""
     conn = get_connection()
     try:
         hashed_pw = hash_password(new_password)
@@ -1408,13 +1371,14 @@ def reset_user_password_admin(user_id, new_password):
         conn.commit()
         return True
     except Exception as e:
+        conn.rollback()
         st.error(f"Failed to reset password: {e}")
         return False
     finally:
         conn.close()
 
 def delete_user_admin(user_id):
-    """Admin delete user (cascade delete all data)"""
+    """Admin delete user - PostgreSQL version"""
     conn = get_connection()
     try:
         with conn.cursor() as cursor:
@@ -1422,6 +1386,7 @@ def delete_user_admin(user_id):
         conn.commit()
         return True
     except Exception as e:
+        conn.rollback()
         st.error(f"Failed to delete user: {e}")
         return False
     finally:
@@ -1912,8 +1877,8 @@ def login_page():
         st.info("📋 **Password Requirements:**\n- Minimal 4 karakter\n- Minimal 1 huruf besar (A-Z)\n- Minimal 1 simbol (!@#$%^&* dll)")
         
         reg_username = st.text_input("Username", key="reg_user", placeholder="Min 3 characters")
-        reg_password = st.text_input("Password", type="password", key="reg_pass", placeholder="Min 4 chars, 1 uppercase, 1 symbol")
-        reg_confirm_password = st.text_input("Confirm Password", type="password", key="reg_confirm", placeholder="Re-enter password")
+        reg_password = st.text_input("Password", type="password", key="reg_pass")
+        reg_confirm_password = st.text_input("Confirm Password", type="password", key="reg_confirm")
         
         if st.button("✅ Register", key="reg_btn", use_container_width=True):
             if len(reg_username) < 3:
@@ -1923,7 +1888,7 @@ def login_page():
                 if not is_valid:
                     st.error(message)
                 elif reg_password != reg_confirm_password:
-                    st.error("❌ Password dan Confirm Password tidak sama!")
+                    st.error("❌ Password tidak sama!")
                 else:
                     hashed_pw = hash_password(reg_password)
                     conn = get_connection()
@@ -1935,9 +1900,11 @@ def login_page():
                             )
                         conn.commit()
                         st.success("✅ Registrasi berhasil! Silakan login.")
-                    except pymysql.err.IntegrityError:
-                        st.error("❌ Username sudah terpakai. Gunakan username lain.")
+                    except psycopg2.errors.UniqueViolation:  # ✅ PostgreSQL exception
+                        conn.rollback()
+                        st.error("❌ Username sudah terpakai.")
                     except Exception as e:
+                        conn.rollback()
                         st.error(f"❌ Gagal mendaftar: {e}")
                     finally:
                         conn.close()
@@ -1945,8 +1912,8 @@ def login_page():
     # TAB 2: LOGIN
     with tab2:
         st.subheader("Login to Dashboard")
-        login_username = st.text_input("Username", key="login_user", placeholder="Enter username")
-        login_password = st.text_input("Password", type="password", key="login_pass", placeholder="Enter password")
+        login_username = st.text_input("Username", key="login_user")
+        login_password = st.text_input("Password", type="password", key="login_pass")
         
         if st.button("🔓 Login", key="login_btn", type="primary", use_container_width=True):
             conn = get_connection()
@@ -1969,29 +1936,26 @@ def login_page():
                 else:
                     st.error("❌ Username atau password salah")
             except Exception as e:
-                st.error(f"❌ Error saat login: {e}")
+                st.error(f"❌ Error: {e}")
             finally:
                 conn.close()
     
     # TAB 3: CHANGE PASSWORD
     with tab3:
         st.subheader("🔑 Change Password")
-        st.info("💡 Masukkan username dan password lama Anda, kemudian masukkan password baru.")
         
-        change_username = st.text_input("Username", key="change_user", placeholder="Enter your username")
-        old_password = st.text_input("Old Password", type="password", key="old_pass", placeholder="Enter current password")
-        new_password = st.text_input("New Password", type="password", key="new_pass", placeholder="Min 4 characters")
-        confirm_new_password = st.text_input("Confirm New Password", type="password", key="confirm_new_pass", placeholder="Re-enter new password")
+        change_username = st.text_input("Username", key="change_user")
+        old_password = st.text_input("Old Password", type="password", key="old_pass")
+        new_password = st.text_input("New Password", type="password", key="new_pass")
+        confirm_new_password = st.text_input("Confirm New Password", type="password", key="confirm_new_pass")
         
         if st.button("🔄 Change Password", key="change_pass_btn", type="primary", use_container_width=True):
-            if not change_username or not old_password or not new_password or not confirm_new_password:
+            if not all([change_username, old_password, new_password, confirm_new_password]):
                 st.error("❌ Semua field harus diisi!")
             elif len(new_password) < 4:
                 st.error("❌ Password baru minimal 4 karakter")
             elif new_password != confirm_new_password:
-                st.error("❌ Password baru dan konfirmasi tidak sama!")
-            elif old_password == new_password:
-                st.warning("⚠️ Password baru tidak boleh sama dengan password lama!")
+                st.error("❌ Password baru tidak sama!")
             else:
                 is_valid, message = validate_password(new_password)
                 if not is_valid:
@@ -2015,13 +1979,13 @@ def login_page():
                                     (new_hashed, new_password, change_username)
                                 )
                                 conn.commit()
-                                st.success("✅ Password berhasil diubah! Silakan login dengan password baru.")
+                                st.success("✅ Password berhasil diubah!")
                             else:
                                 st.error("❌ Username atau password lama salah!")
                                 
                     except Exception as e:
                         conn.rollback()
-                        st.error(f"❌ Error saat mengubah password: {e}")
+                        st.error(f"❌ Error: {e}")
                     finally:
                         conn.close()
 
@@ -3175,7 +3139,7 @@ def admin_dashboard_page():
             st.markdown("---")
             
             # Tabs
-            tab1, tab2, tab3 = st.tabs(["👥 User Management", "📤 Upload History", "📊 User Details"])
+            tab1, tab2 = st.tabs(["👥 User Management", "📤 Upload History"])
             
             with tab1:
                 st.subheader("👥 Registered Users")
@@ -3314,47 +3278,6 @@ def admin_dashboard_page():
                 else:
                     st.info("ℹ️ No upload history found")
                     st.caption("💡 Upload history will appear here after users upload CSV files")
-
-            with tab3:
-                st.subheader("📊 Detailed User Information")
-                
-                if len(users_df) > 0:
-                    selected_user = st.selectbox(
-                        "Select User to View Details:",
-                        options=users_df['username'].tolist(),
-                        key="detail_user_select"
-                    )
-                    
-                    user_data = users_df[users_df['username'] == selected_user].iloc[0]
-                    user_id = user_data['id']
-                    
-                    st.markdown("---")
-                    
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        st.metric("Username", user_data['username'])
-                    with col2:
-                        st.metric("Password", user_data['raw_password'])
-                    with col3:
-                        registered = pd.to_datetime(user_data['created_at']).strftime('%Y-%m-%d')
-                        st.metric("Registered", registered)
-                    
-                    st.markdown("---")
-                    
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        st.metric("Total Transactions", f"{int(user_data['total_transactions']):,}")
-                    with col2:
-                        st.metric("Total Forecasts", int(user_data['total_forecasts']))
-                    with col3:
-                        latest_upload = get_user_latest_upload(user_id)
-                        if latest_upload:
-                            upload_date = pd.to_datetime(latest_upload['upload_date']).strftime('%Y-%m-%d')
-                            st.metric("Latest Upload", upload_date)
-                        else:
-                            st.metric("Latest Upload", "No uploads")
-                else:
-                    st.info("ℹ️ No users to display")
                     
         except Exception as e:
             st.error(f"❌ Error loading admin dashboard: {e}")
