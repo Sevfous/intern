@@ -3348,8 +3348,6 @@ def admin_management_page():
                             st.success(f"✅ User '{user_to_delete}' deleted!")
                             st.rerun()
 
-st.write("DB HOST =", st.secrets["supabase"]["host"])
-
 # ------------------ MAIN ------------------
 def main():
     """
