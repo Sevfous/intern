@@ -35,24 +35,21 @@ MAX_PLOT_POINTS = 2000       # Max points for plotting
 
 # ------------------ DATABASE CONNECTION ------------------
 def get_connection():
-    """
-    Connect to Supabase PostgreSQL database
-    Credentials untuk project: db.jzrghramanqolxgzdpkf
-    """
     try:
         connection = psycopg2.connect(
-            host="db.jzrghramanqolxgzdpkf.supabase.co",
-            port=5432,
-            database="postgres",
-            user="postgres",
-            password="OAB6It7fUDIwYH2w",
+            host=st.secrets["supabase"]["host"],
+            port=st.secrets["supabase"]["port"],
+            database=st.secrets["supabase"]["database"],
+            user=st.secrets["supabase"]["user"],
+            password=st.secrets["supabase"]["password"],
+            sslmode="require",          # ⬅️ INI WAJIB
             cursor_factory=RealDictCursor
         )
-        connection.autocommit = False  # Manual commit
+        connection.autocommit = False
         return connection
     except Exception as e:
-        st.error(f"❌ Koneksi database gagal: {e}")
-        st.info("💡 Periksa credentials Supabase Anda")
+        st.error("❌ Koneksi database gagal")
+        st.exception(e)
         raise
 
 
